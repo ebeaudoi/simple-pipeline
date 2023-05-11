@@ -1,0 +1,84 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: task-buildah-1
+spec:
+  params:
+  - name: app-name
+    type: string
+    description: The application name
+  stepTemplate:
+    volumeMounts:
+    - name: varlibc
+      mountPath: /var/lib/containers
+    - name: quay-auth-secret
+      mountPath: /etc/secret-volume
+      readOnly: true
+  steps:
+  - name: build-image
+    image: quay.io/buildah/stable:latest
+    securityContext:
+      capabilities:
+        add:
+        - SETFCAP
+    imagePullPolicy: IfNotPresent
+    script: |
+      #!/bin/bash
+      export BUILDAH_ISOLATION=chroot
+      DESTINATION_IMAGE="quay.io/ebeaudoi/pipeline:latest"
+      echo "**** ls /etc/secret volume *******"
+      ls -ltr /etc/secret-volume
+      echo "**** Set arguments for buildah"
+      BUILDAH_ARGS="--storage-driver vfs"
+      BUILDAH_PUSH="--storage-driver vfs --authfile /etc/secret-volume/config.json"
+      echo "**** Create a new container from the ubi-minimal 8.5 image"
+      CONTAINER=$( buildah ${BUILDAH_ARGS} from registry.access.redhat.com/ubi8/ubi-minimal:8.5 )
+      echo "**** Create a simple application for the new container to run"
+      cat << EOF > ./test.sh
+      #!/bin/bash
+      echo "---- hello there! ----"
+      sleep 5
+      echo "---- goodbye for now. ----"
+      exit 0
+      EOF
+      chmod 750 ./test.sh
+      echo "**** Copy the simple application to the new container"
+      buildah ${BUILDAH_ARGS} copy ${CONTAINER} ./test.sh /application.sh
+      echo "**** Set the entry point for the new container"
+      buildah ${BUILDAH_ARGS} config --entrypoint '["/application.sh"]' ${CONTAINER}
+      echo "**** Add a label to the new container"
+      buildah ${BUILDAH_ARGS} config --label APP_LABEL="Hello This Is My Label" --author="Tekton" ${CONTAINER}
+      echo "**** Save the new container image"
+      buildah ${BUILDAH_ARGS} commit ${CONTAINER} ${DESTINATION_IMAGE}
+      echo "**** Disconnect from the new container image"
+      buildah ${BUILDAH_ARGS} unmount ${CONTAINER}
+      echo "**** Push the new container image to the cluster image registry"
+      buildah ${BUILDAH_PUSH} push ${DESTINATION_IMAGE} docker://${DESTINATION_IMAGE}
+    env:
+    - name: user.home
+      value: /workspace
+    workingDir: "/workspace"
+  - name: create-pod
+    image: image-registry.openshift-image-registry.svc:5000/openshift/cli
+    imagePullPolicy: IfNotPresent
+    script: |
+      cat << EOF | oc apply -f -
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: pipeline-pod
+      spec:
+        restartPolicy: Never
+        containers:
+        - name: pipeline-container
+          image: quay.io/ebeaudoi/pipeline:latest
+      EOF
+  volumes:
+  - name: varlibc
+    emptyDir: {}
+  - name: quay-auth-secret
+    secret:
+      secretName: ebeaudoi-quayrobot1-pull-secret
+      items:
+        - key: .dockerconfigjson
+          path: config.json
