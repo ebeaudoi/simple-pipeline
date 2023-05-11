@@ -1,0 +1,15 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: my-app-pipeline-run-yes
+  labels:
+    app-name: my-app-pipeline
+spec:
+  serviceAccountName: pipeline
+  pipelineRef: 
+    name: build-container-run-pod
+  params:
+  - name: app-name
+    value: my-app
+  - name: run-it
+    value: yes-please
